@@ -5,35 +5,41 @@ import requests
 import datetime
 from bs4 import BeautifulSoup
 
+vin_not_found_error_msg = "Vin not found error."
+
 
 def is_error_in_response(result):
 
     if result.status_code in [500]:
         return True, 'internal server error in maker site.'
 
-    if "error retrieving recall" in result.text.lower():
+    result = result.text.lower()
+
+    if "error retrieving recall" in result:
         return True, "error retrieving recall"
 
-    if "read timed out executing" in result.text.lower():
+    if "read timed out executing" in result:
         return True, "read timed out executing"
 
-    if "service unavailable" in result.text.lower():
+    if "service unavailable" in result:
         return True, "service unavailable"
 
-    if "unable to tunnel through proxy" in result.text.lower():
+    if "unable to tunnel through proxy" in result:
         return True, "unable to tunnel through proxy"
 
-    if "could not extract response" in result.text.lower():
+    if "could not extract response" in result:
         return True, "could not extract response"
 
-    if "failure to fetch the Recall data".lower() in result.text.lower():
+    if "failure to fetch the Recall data" in result:
         return True, "failure to fetch the recall data"
 
-    if "forbidden" in result.text.lower():
+    if "forbidden" in result:
         return True, "forbidden"
 
-    if 'The VIN entered appears not to be working properly.'.lower() in result.text.lower():
-        return True, "The VIN entered appears not to be working properly."
+    if 'the vin entered appears not to be working properly.' in result or 'VEHICLE_INVALID_VIN'.lower() in result or \
+            'This is not a recognized Nissan VIN'.lower() in result or \
+            'The VIN entered is not a recognized vehicle in our system.'.lower() in result:
+        return True, vin_not_found_error_msg
 
     return False, ''
 
@@ -70,12 +76,15 @@ class RecallSpider:
             "Car Name": self.make,
             "Vin Number": self.vin,
             "incomplete_recalls": 0,
+            "response_status_from_company_site": 200
         }
 
         if self.make.lower() in ['chrysler', 'dodge', 'jeep', 'ram']:
-            url = ("https://www.mopar.com/moparsvc/recallInfo?vin={}&mrkt=ca&language=en_ca&campaign_status=All&campaign_type=A&callback=showVinInfo").format(self.vin.strip())
+            url = ("https://www.mopar.com/moparsvc/recallInfo?vin={}&mrkt=ca&language=en_ca&campaign_status=All"
+                   "&campaign_type=A&callback=showVinInfo").format(self.vin.strip())
 
             res = get_result(url)
+            items['response_status_from_company_site'] = res.status_code
             js = res.text.replace("showVinInfo(", "").replace("]}}]})", "]}}]}") \
                 .replace("}}]})", "}}]}").replace('}]})', '}]}')
 
@@ -100,35 +109,39 @@ class RecallSpider:
                             items.update(row_out)
 
                     items["incomplete_recalls"] = count
+            elif js['vin_recall'][0]['vin_status_desc'] == 'Invalid VIN':
+                items['Message'] = vin_not_found_error_msg
             else:
-                items['message'] = js['vin_recall'][0]['vin_status_desc']
-
+                items['Message'] = js['vin_recall'][0]['vin_status_desc']
+                
         elif self.make.lower(
         ) in ['chevrolet', 'buick', 'gmc', 'cadillac', 'pontiac', 'oldsmobile', 'saturn', 'hummer', 'saab']:
 
             url = 'https://my.gm.ca/cms/read/all/gm/ca/en?callback=gm.cmsPrefetchHandler&maxTextLength=400'
             res = get_result(url)
+
             error, error_msg = is_error_in_response(res)
 
             if error:
-                items['message'] = error_msg
+                items['Message'] = error_msg
 
             self.err_list_js = res.text.replace('"}])', '"}]').replace('gm.cmsPrefetchHandler(', '')
             self.err_list_js = json.loads(self.err_list_js)
 
             url = "https://my.gm.ca/gm/en/api/{}/recalls?cb=".format(self.vin.strip())
-
             res = get_result(url)
+
+            items['response_status_from_company_site'] = res.status_code
             error, error_msg = is_error_in_response(res)
             if error:
-                items['message'] = error_msg
+                items['Message'] = error_msg
             else:
                 js = json.loads(res.text)
                 count = 0
 
                 if not js['data']:
-                    error = js['messages'][0]
-                    items['message'] = error
+                    error = js['Messages'][0]
+                    items['Message'] = error
                 else:
                     items = {
                         "Car Name": self.make,
@@ -160,14 +173,14 @@ class RecallSpider:
                    '&langscript=LATN&language=EN&region=US').format(self.vin.strip())
             print(url)
             res = get_result(url)
-
+            items['response_status_from_company_site'] = res.status_code
             if "input parameter invalid".lower() in res.text.lower():
-                items['message'] = "Input parameter invalid"
+                items['Message'] = "Input parameter invalid"
 
             error, error_msg = is_error_in_response(res)
 
             if error:
-                items['message'] = error_msg
+                items['Message'] = error_msg
             else:
                 js = json.loads(res.text)
                 name = None
@@ -195,7 +208,7 @@ class RecallSpider:
                     error, error_msg = is_error_in_response(res)
 
                     if error:
-                        items['message'] = error_msg
+                        items['Message'] = error_msg
                     else:
                         js = json.loads(res.text)
                         name = '{} {}'.format(js['decodedVin']['modelYear']['attributeValue'],
@@ -206,10 +219,11 @@ class RecallSpider:
             url = 'https://www.honda.ca/recalls/{}'.format(self.vin.strip())
             print(url)
             res = get_result(url)
-            error, error_msg = is_error_in_response(res)
+            items['response_status_from_company_site'] = res.status_code
 
+            error, error_msg = is_error_in_response(res)
             if error:
-                items['message'] = error_msg
+                items['Message'] = error_msg
             else:
                 count = 0
                 soup = BeautifulSoup(res.content, "html.parser")
@@ -240,11 +254,12 @@ class RecallSpider:
             url = 'https://www.hyundaicanada.com/en/owners-section/recalls?VIN={}'.format(self.vin.strip())
             print(url)
             res = get_result(url)
+
+            items['response_status_from_company_site'] = res.status_code
             error, error_msg = is_error_in_response(res)
-            if "vin entered is not a recognized vehicle in our system" in res.text.lower():
-                items['message'] = "vin entered is not a recognized vehicle in our system"
+
             if error:
-                items['message'] = error_msg
+                items['Message'] = error_msg
             else:
                 soup = BeautifulSoup(res.content, "html.parser")
                 count = 0
@@ -269,23 +284,24 @@ class RecallSpider:
 
                 items['incomplete_recalls'] = count
 
-        if self.make.lower() in ['toyota']:
+        elif self.make.lower() in ['toyota']:
             url = 'https://www.toyota.ca/toyota/RecallsByVin'
             res = get_result(url)
-            error, error_msg = is_error_in_response(res)
-
-            if error:
-                items['message'] = error_msg
-            else:
-                items['message'] = 'Scraper not implemented for toyota.'
+            # error, error_msg = is_error_in_response(res)
+            #
+            # if error:
+            #     items['Message'] = error_msg
+            # else:
+            items['response_status_from_company_site'] = None
+            items['Message'] = 'Scraper not implemented for toyota.'
 
         elif self.make.lower() in ['nissan']:
             url = "https://nna.secure.force.com/support/ContactUsNissan?recallLookup"
             res = get_result(url)
-            error, error_msg = is_error_in_response(res)
 
+            error, error_msg = is_error_in_response(res)
             if error:
-                items['message'] = error_msg
+                items['Message'] = error_msg
 
             else:
                 soup = BeautifulSoup(res.content, "html.parser")
@@ -326,12 +342,12 @@ class RecallSpider:
                     "&".format(self.vin, nissan_state, nissan_state_version, nissan_state_mac)
                 )
 
-                error, error_msg = is_error_in_response(res)
-                if 'This is not a recognized Nissan VIN'.lower() in res.text.lower():
-                    items['message'] = 'This is not a recognized Nissan VIN'
+                items['response_status_from_company_site'] = res.status_code
 
-                elif error:
-                    items['message'] = error_msg
+                error, error_msg = is_error_in_response(res)
+
+                if error:
+                    items['Message'] = error_msg
                 else:
                     soup = BeautifulSoup(res.content, "html.parser")
 
@@ -352,11 +368,15 @@ class RecallSpider:
                         row_out = {}
                         count += 1
                         row_out["Recall Type {}".format(count)] = ''
-                        row_out["Recall Status {}".format(count)] = date
+                        row_out["Recall Status {}".format(count)] = ''
                         row_out["Recall Title {}".format(count)] = title
                         row_out["Description {}".format(count)] = ''
 
                         items.update(row_out)
                     items['incomplete_recalls'] = count
+
+        else:
+            items["response_status_from_company_site"] = None
+            items["Message"] = 'no maker matched to the name.'
 
         return items
